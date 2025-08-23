@@ -1,0 +1,992 @@
+0001   0000             ; Minimal ZX81 / Minstrel 3 display system
+0002   0000             ; Dave Curran 2025-08-02
+0003   0000             ;
+0004   0000             ; 20ms / 50Hz frame
+0005   0000             ; 64us / 15.625KHz line
+0006   0000             ; 312 lines
+0007   0000             ;
+0008   0000             ; 8 lines VSync
+0009   0000             ; 56 lines top border
+0010   0000             ; 192 lines display 32 characters, 24 rows, 8x8 characters
+0011   0000             ; 56 lines bottom border
+0012   0000             
+0013   0000             ; TASM -80 -b -L slow.asm slow.bin
+0014   0000             
+0015   0000             ; These locations are based on the ZX81 and can be moved to fit your code
+0016   0000             DFILE_PTR       .EQU    $400C   ; display file pointer (ZX81 location)
+0017   0000             MARGIN          .EQU    $4028   ; store for calculated value of margin 31d or 55d for NTSC/PAL
+0018   0000             DFILE           .EQU    $4100   ; location of DFLIE (moveable)
+0019   0000             
+0020   0000             CHAR_SPACE      .EQU    $00     ; space character
+0021   0000             ASTERISK        .EQU    $17     ; * character
+0022   0000             CHAR_0          .EQU    $1C     ; 0 character
+0023   0000             CHAR_Z          .EQU    $3F     ; Z character
+0024   0000             NEW_LINE        .EQU    $76     ; NEWLINE / HALT character
+0025   0000             
+0026   0000             
+0027   0000             .ORG $0000
+0028   0000             ; ----------
+0029   0000             ; START HERE
+0030   0000             ; ----------
+0031   0000             START:
+0032   0000 D3 FD               OUT     ($FD),A         ; Turn off NMI generator
+0033   0002 31 FF 7F            LD      SP, $7FFF       ; Set the stack-pointer to top of RAM
+0034   0005 C3 CA 00            JP      INIT            ; System init
+0035   0008             
+0036   0008             ;############################### SPACE HERE ####################################
+0037   0008             ; Space for RST handlers etc.
+0038   0008             
+0039   0038             .ORG $0038
+0040   0038             ; --------------------------
+0041   0038             ; MASKABLE INTERRUPT HANDLER
+0042   0038             ; --------------------------
+0043   0038             INTERRUPT:  
+0044   0038 0D                  DEC     C               ; Scan line counter
+0045   0039 C2 45 00            JP      NZ,SCAN_LINE    ; Still got scanlines to do
+0046   003C             
+0047   003C             NEW_ROW:
+0048   003C E1                  POP     HL              ; Address of the start of the next line
+0049   003D 05                  DEC     B               ; Row counter
+0050   003E C8                  RET     Z               ; Return to display generation code
+0051   003F CB D9               SET     3,C             ; Reset scanline counter to 8
+0052   0041             
+0053   0041             WAIT_INT:  
+0054   0041 ED 4F               LD      R,A             ; Refresh register to $DD
+0055   0043 FB                  EI                      ; Enable maskable interrupt
+0056   0044 E9                  JP      (HL)            ; Jump to display file (will halt and then interrupt)
+0057   0045             
+0058   0045             SCAN_LINE:  
+0059   0045 D1                  POP     DE              ; Throw away address of the next line
+0060   0046 C8                  RET     Z               ; Should never happen
+0061   0047 18 F8               JR      WAIT_INT        ; Continue above
+0062   0049             
+0063   0049             ;############################### SPACE HERE ####################################
+0064   0049             ; Space here
+0065   0049             
+0066   0066             .ORG $0066
+0067   0066             ; ------------------------------
+0068   0066             ; NON MASKABLE INTERRUPT HANDLER
+0069   0066             ; ------------------------------
+0070   0066             NMI:    
+0071   0066 08                  EX      AF,AF'          ; Switch to alt AF
+0072   0067 3C                  INC     A               ; Border line counter
+0073   0068 FA 6D 00            JP      M,NMI_RET       ; Still counting up?
+0074   006B 28 02               JR      Z,END_OF_BORDER ; End of border?
+0075   006D             
+0076   006D             NMI_RET:  
+0077   006D 08                  EX      AF,AF'          ; Restore AF
+0078   006E C9                  RET                     ; Return to user code
+0079   006F             
+0080   006F             ; ------------------
+0081   006F             ; BORDER IS COMPLETE
+0082   006F             ; ------------------
+0083   006F             END_OF_BORDER:  
+0084   006F 08                  EX      AF,AF'          ; Restore AF
+0085   0070 F5                  PUSH    AF              ; Save the user code main registers
+0086   0071 C5                  PUSH    BC              ; 
+0087   0072 D5                  PUSH    DE              ;
+0088   0073 E5                  PUSH    HL              ;
+0089   0074 2A 0C 40            LD      HL,(DFILE_PTR)  ; Get the display file pointer
+0090   0077 CB FC               SET     7,H             ; Move to the high RAM echo
+0091   0079 76                  HALT                    ; Halt -> Wait to sync timing
+0092   007A D3 FD               OUT     ($FD),A         ; Stop the NMI generator
+0093   007C DD E9               JP      (IX)            ; -> AFTER_TOP_BORDER or AFTER_BOTTOM_BORDER
+0094   007E             
+0095   007E             ; ----------------------------
+0096   007E             ; START THE DISPLAY GENERATION
+0097   007E             ; ----------------------------
+0098   007E             INIT_DISPLAY:  
+0099   007E F5                  PUSH    AF              ; Save registers
+0100   007F C5                  PUSH    BC              ; 
+0101   0080 D5                  PUSH    DE              ; 
+0102   0081 E5                  PUSH    HL              ; 
+0103   0082             
+0104   0082             START_FRAME: 
+0105   0082 06 0A               LD      B, 10           ; short delay before VSync
+0106   0084             PRE_VSYNC_LOOP:
+0107   0084 10 FE               DJNZ PRE_VSYNC_LOOP     ; or replace with code matching timing (~129 cycles)
+0108   0086             
+0109   0086 01 FE FF            LD      BC,$FFFE        ; Set full address bus for IORE, port $FE, no row selected
+0110   0089 ED 78               IN      A,(C)           ; Read the port, start VSYNC
+0111   008B 17                  RLA                     ; Bit 7 -> carry
+0112   008C 17                  RLA                     ; Bit 6 -> carry
+0113   008D 9F                  SBC     A,A             ; A = $FF (UK), $00 (US)
+0114   008E E6 18               AND     $18             ; A = $18 (UK), $00 (US)
+0115   0090 C6 1F               ADD     A,$1F           ; A = $37 (UK), $1F (US)
+0116   0092 32 28 40            LD      (MARGIN),A      ; Set MARGIN to number of border lines -1, 55 (UK) or 31 (US)
+0117   0095             
+0118   0095 06 7C               LD      B, 124          ; delay adjusted to make VSync 512us (~1600 cycles)
+0119   0097             VSYNC_LOOP:
+0120   0097 10 FE               DJNZ VSYNC_LOOP         ; or replace with code matching timing
+0121   0099             
+0122   0099 D3 FF               OUT     ($FF),A         ; End VSync
+0123   009B             
+0124   009B 2A 0C 40            LD      HL,(DFILE_PTR)  ; HL = address of display file
+0125   009E CB FC               SET     7,H             ; HL = address of display file echo in high RAM
+0126   00A0             
+0127   00A0 CD B4 00            CALL    DRAW_BORDER     ; Draw the top border
+0128   00A3             
+0129   00A3                     ; continues after top border is complete
+0130   00A3             
+0131   00A3             AFTER_TOP_BORDER:
+0132   00A3 ED 5F               LD      A,R             ; For timing?
+0133   00A5 01 01 19            LD      BC,$1901        ; line counter
+0134   00A8 3E F5               LD      A,$F5           ; R -> F5 later
+0135   00AA CD C4 00            CALL    DRAW_DISPLAY    ; Draw the display
+0136   00AD             
+0137   00AD                     ; continues after display is complete
+0138   00AD             
+0139   00AD             AFTER_DISPLAY:      
+0140   00AD 2B                  DEC     HL              ; point HL to the last NEWLINE/HALT
+0141   00AE CD B4 00            CALL    DRAW_BORDER     ; Draw the bottom border
+0142   00B1             
+0143   00B1                     ; continues after bottom border is complete
+0144   00B1             
+0145   00B1             AFTER_BOTTOM_BORDER:
+0146   00B1 C3 82 00            JP      START_FRAME     ; Back to the start
+0147   00B4             
+0148   00B4             ; --------------------------------
+0149   00B4             ; Begin to draw one of the borders
+0150   00B4             ; --------------------------------
+0151   00B4             DRAW_BORDER:  
+0152   00B4 DD E1               POP     IX              ; IX = AFTER_TOP_BORDER or AFTER_BOTTOM_BORDER
+0153   00B6 3A 28 40            LD      A, (MARGIN)     ; A = $37 (UK) or $1F (US)
+0154   00B9 ED 44               NEG                     ; A = $C9 (UK) or $E1 (US)
+0155   00BB 3C                  INC     A               ; A = $CA (UK) or $E2 (US)
+0156   00BC 08                  EX      AF,AF'          ; A' = $CA (UK) or $E2 (US)
+0157   00BD             
+0158   00BD D3 FE               OUT     ($FE),A         ; Enable the NMI generator
+0159   00BF             
+0160   00BF E1                  POP     HL              ; Restore user registers
+0161   00C0 D1                  POP     DE              ; 
+0162   00C1 C1                  POP     BC              ; 
+0163   00C2 F1                  POP     AF              ; 
+0164   00C3             
+0165   00C3 C9                  RET                     ; Return to user code during borders, with NMI interruptions
+0166   00C4             
+0167   00C4             ; -------------------------
+0168   00C4             ; Begin to draw the display
+0169   00C4             ; -------------------------
+0170   00C4             DRAW_DISPLAY:
+0171   00C4 ED 4F               LD      R,A             ; R = $F5
+0172   00C6 3E DD               LD      A,$DD           ; R will be set to $DD later
+0173   00C8 FB                  EI                      ; Enable interrupts
+0174   00C9 E9                  JP      (HL)            ; Jump to the first halt in the DFILE echo
+0175   00CA             
+0176   00CA             ; -----------
+0177   00CA             ; SYSTEM INIT
+0178   00CA             ; -----------
+0179   00CA             INIT:                                   
+0180   00CA 21 00 41            LD      HL, DFILE       ; Create the display file
+0181   00CD 22 0C 40            LD      (DFILE_PTR), HL ; set pointer to DFILE
+0182   00D0 0E 18               LD      C, 24           ; row counter
+0183   00D2 3E 00               LD      A, CHAR_SPACE   ; all spaces
+0184   00D4             
+0185   00D4             DFILE_ROW:
+0186   00D4 36 76               LD      (HL), NEW_LINE  ; first character is a newline
+0187   00D6 23                  INC     HL              ; pointer++
+0188   00D7 06 20               LD      B, 32           ; 32 characters
+0189   00D9             DFILE_CHAR:
+0190   00D9 77                  LD      (HL), A         ; write character
+0191   00DA 23                  INC     HL              ; pointer++   
+0192   00DB 10 FC               DJNZ    DFILE_CHAR      ; go back for more
+0193   00DD             
+0194   00DD 0D                  DEC     C               ; row done
+0195   00DE 20 F4               JR      NZ, DFILE_ROW   ; do more rows?
+0196   00E0             
+0197   00E0 36 76               LD      (HL), NEW_LINE  ; one final newline
+0198   00E2             
+0199   00E2 3E 1E               LD      A,$1E           ; address of the character set is $1E00
+0200   00E4 ED 47               LD      I,A             ; set I register, used by the display hardware
+0201   00E6 ED 56               IM      1               ; set interrupt mode 1
+0202   00E8             
+0203   00E8 CD 7E 00            CALL    INIT_DISPLAY    ; initialise the display
+0204   00EB             
+0205   00EB                     ; continues to
+0206   00EB             
+0207   00EB             ; ---------
+0208   00EB             ; USER CODE
+0209   00EB             ; ---------
+0210   00EB             ; user code keeps running, interrupted by the display routines
+0211   00EB             ; sample code fills the display file with a character set then animates it. 
+0212   00EB             
+0213   00EB             ; ---------
+0214   00EB             ; USER INIT
+0215   00EB             ; ---------
+0216   00EB             USER_INIT:                      ; fill the display with a pattern
+0217   00EB 0E 18               LD      C, 24           ; row counter
+0218   00ED 2A 0C 40            LD      HL, (DFILE_PTR) ; get pointer to DFILE
+0219   00F0 3E 00               LD      A, CHAR_SPACE   ; start with space
+0220   00F2             NEXT_ROW:
+0221   00F2 06 20               LD      B, 32           ; 32 characters
+0222   00F4 36 76               LD      (HL), NEW_LINE  ; start with a newline
+0223   00F6 23                  INC     HL              ; pointer++
+0224   00F7             NEXT_CHAR:
+0225   00F7 77                  LD      (HL), A         ; write character
+0226   00F8 23                  INC     HL              ; pointer++
+0227   00F9 3C                  INC     A               ; character++
+0228   00FA 10 FB               DJNZ    NEXT_CHAR       ; back for more
+0229   00FC             
+0230   00FC D6 1F               SUB     31              ; start the next row 1 character later
+0231   00FE 0D                  DEC     C               ; row done
+0232   00FF 20 F1               JR      NZ, NEXT_ROW    ; do more rows
+0233   0101                     
+0234   0101 36 76               LD      (HL), NEW_LINE  ; one final newline
+0235   0103             
+0236   0103             ; ---------
+0237   0103             ; USER LOOP
+0238   0103             ; ---------
+0239   0103             USER_LOOP:  
+0240   0103 2A 0C 40            LD      HL, (DFILE_PTR) ; get a pointer to the start of the display file
+0241   0106 06 18               LD      B, 24           ; number of lines to look for
+0242   0108             NEXT_C:
+0243   0108 23                  INC     HL              ; pointer++
+0244   0109 7E                  LD      A, (HL)         ; get char
+0245   010A FE 76               CP      NEW_LINE        ; newline?
+0246   010C CA 15 01            JP      Z, CHECK_EOL    ; yes
+0247   010F 3C                  INC     A               ; character++
+0248   0110 E6 3F               AND     CHAR_Z          ; mask characters to 00-3F
+0249   0112 77                  LD      (HL), A         ; update display file      
+0250   0113 18 F3               JR      NEXT_C          ; back for more
+0251   0115             
+0252   0115             CHECK_EOL:
+0253   0115 10 F1               DJNZ    NEXT_C          ; completed enough lines?
+0254   0117             
+0255   0117 18 EA               JR      USER_LOOP       ; repeat forever
+0256   0119             
+0257   0119             
+0258   0119             ;############################### SPACE HERE ####################################
+0259   0119             
+0260   0119             
+0261   1E00             .ORG $1E00
+0262   1E00             
+0263   1E00             ; ------------------------
+0264   1E00             ; THE 'ZX81 CHARACTER SET'
+0265   1E00             ; ------------------------
+0266   1E00             
+0267   1E00             ; $00 - Character: ' '          CHR$(0)
+0268   1E00             
+0269   1E00 00                  .BYTE   %00000000
+0270   1E01 00                  .BYTE   %00000000
+0271   1E02 00                  .BYTE   %00000000
+0272   1E03 00                  .BYTE   %00000000
+0273   1E04 00                  .BYTE   %00000000
+0274   1E05 00                  .BYTE   %00000000
+0275   1E06 00                  .BYTE   %00000000
+0276   1E07 00                  .BYTE   %00000000
+0277   1E08             
+0278   1E08             ; $01 - Character: mosaic       CHR$(1)
+0279   1E08             
+0280   1E08 F0                  .BYTE   %11110000
+0281   1E09 F0                  .BYTE   %11110000
+0282   1E0A F0                  .BYTE   %11110000
+0283   1E0B F0                  .BYTE   %11110000
+0284   1E0C 00                  .BYTE   %00000000
+0285   1E0D 00                  .BYTE   %00000000
+0286   1E0E 00                  .BYTE   %00000000
+0287   1E0F 00                  .BYTE   %00000000
+0288   1E10             
+0289   1E10             
+0290   1E10             ; $02 - Character: mosaic       CHR$(2)
+0291   1E10             
+0292   1E10 0F                  .BYTE   %00001111
+0293   1E11 0F                  .BYTE   %00001111
+0294   1E12 0F                  .BYTE   %00001111
+0295   1E13 0F                  .BYTE   %00001111
+0296   1E14 00                  .BYTE   %00000000
+0297   1E15 00                  .BYTE   %00000000
+0298   1E16 00                  .BYTE   %00000000
+0299   1E17 00                  .BYTE   %00000000
+0300   1E18             
+0301   1E18             
+0302   1E18             ; $03 - Character: mosaic       CHR$(3)
+0303   1E18             
+0304   1E18 FF                  .BYTE   %11111111
+0305   1E19 FF                  .BYTE   %11111111
+0306   1E1A FF                  .BYTE   %11111111
+0307   1E1B FF                  .BYTE   %11111111
+0308   1E1C 00                  .BYTE   %00000000
+0309   1E1D 00                  .BYTE   %00000000
+0310   1E1E 00                  .BYTE   %00000000
+0311   1E1F 00                  .BYTE   %00000000
+0312   1E20             
+0313   1E20             ; $04 - Character: mosaic       CHR$(4)
+0314   1E20             
+0315   1E20 00                  .BYTE   %00000000
+0316   1E21 00                  .BYTE   %00000000
+0317   1E22 00                  .BYTE   %00000000
+0318   1E23 00                  .BYTE   %00000000
+0319   1E24 F0                  .BYTE   %11110000
+0320   1E25 F0                  .BYTE   %11110000
+0321   1E26 F0                  .BYTE   %11110000
+0322   1E27 F0                  .BYTE   %11110000
+0323   1E28             
+0324   1E28             ; $05 - Character: mosaic       CHR$(5)
+0325   1E28             
+0326   1E28 F0                  .BYTE   %11110000
+0327   1E29 F0                  .BYTE   %11110000
+0328   1E2A F0                  .BYTE   %11110000
+0329   1E2B F0                  .BYTE   %11110000
+0330   1E2C F0                  .BYTE   %11110000
+0331   1E2D F0                  .BYTE   %11110000
+0332   1E2E F0                  .BYTE   %11110000
+0333   1E2F F0                  .BYTE   %11110000
+0334   1E30             
+0335   1E30             ; $06 - Character: mosaic       CHR$(6)
+0336   1E30             
+0337   1E30 0F                  .BYTE   %00001111
+0338   1E31 0F                  .BYTE   %00001111
+0339   1E32 0F                  .BYTE   %00001111
+0340   1E33 0F                  .BYTE   %00001111
+0341   1E34 F0                  .BYTE   %11110000
+0342   1E35 F0                  .BYTE   %11110000
+0343   1E36 F0                  .BYTE   %11110000
+0344   1E37 F0                  .BYTE   %11110000
+0345   1E38             
+0346   1E38             ; $07 - Character: mosaic       CHR$(7)
+0347   1E38             
+0348   1E38 FF                  .BYTE   %11111111
+0349   1E39 FF                  .BYTE   %11111111
+0350   1E3A FF                  .BYTE   %11111111
+0351   1E3B FF                  .BYTE   %11111111
+0352   1E3C F0                  .BYTE   %11110000
+0353   1E3D F0                  .BYTE   %11110000
+0354   1E3E F0                  .BYTE   %11110000
+0355   1E3F F0                  .BYTE   %11110000
+0356   1E40             
+0357   1E40             ; $08 - Character: mosaic       CHR$(8)
+0358   1E40             
+0359   1E40 AA                  .BYTE   %10101010
+0360   1E41 55                  .BYTE   %01010101
+0361   1E42 AA                  .BYTE   %10101010
+0362   1E43 55                  .BYTE   %01010101
+0363   1E44 AA                  .BYTE   %10101010
+0364   1E45 55                  .BYTE   %01010101
+0365   1E46 AA                  .BYTE   %10101010
+0366   1E47 55                  .BYTE   %01010101
+0367   1E48             
+0368   1E48             ; $09 - Character: mosaic       CHR$(9)
+0369   1E48             
+0370   1E48 00                  .BYTE   %00000000
+0371   1E49 00                  .BYTE   %00000000
+0372   1E4A 00                  .BYTE   %00000000
+0373   1E4B 00                  .BYTE   %00000000
+0374   1E4C AA                  .BYTE   %10101010
+0375   1E4D 55                  .BYTE   %01010101
+0376   1E4E AA                  .BYTE   %10101010
+0377   1E4F 55                  .BYTE   %01010101
+0378   1E50             
+0379   1E50             ; $0A - Character: mosaic       CHR$(10)
+0380   1E50             
+0381   1E50 AA                  .BYTE   %10101010
+0382   1E51 55                  .BYTE   %01010101
+0383   1E52 AA                  .BYTE   %10101010
+0384   1E53 55                  .BYTE   %01010101
+0385   1E54 00                  .BYTE   %00000000
+0386   1E55 00                  .BYTE   %00000000
+0387   1E56 00                  .BYTE   %00000000
+0388   1E57 00                  .BYTE   %00000000
+0389   1E58             
+0390   1E58             ; $0B - Character: '"'          CHR$(11)
+0391   1E58             
+0392   1E58 00                  .BYTE   %00000000
+0393   1E59 24                  .BYTE   %00100100
+0394   1E5A 24                  .BYTE   %00100100
+0395   1E5B 00                  .BYTE   %00000000
+0396   1E5C 00                  .BYTE   %00000000
+0397   1E5D 00                  .BYTE   %00000000
+0398   1E5E 00                  .BYTE   %00000000
+0399   1E5F 00                  .BYTE   %00000000
+0400   1E60             
+0401   1E60             ; $0B - Character:  £           CHR$(12)
+0402   1E60             
+0403   1E60 00                  .BYTE   %00000000
+0404   1E61 1C                  .BYTE   %00011100
+0405   1E62 22                  .BYTE   %00100010
+0406   1E63 78                  .BYTE   %01111000
+0407   1E64 20                  .BYTE   %00100000
+0408   1E65 20                  .BYTE   %00100000
+0409   1E66 7E                  .BYTE   %01111110
+0410   1E67 00                  .BYTE   %00000000
+0411   1E68             
+0412   1E68             ; $0B - Character: '$'          CHR$(13)
+0413   1E68             
+0414   1E68 00                  .BYTE   %00000000
+0415   1E69 08                  .BYTE   %00001000
+0416   1E6A 3E                  .BYTE   %00111110
+0417   1E6B 28                  .BYTE   %00101000
+0418   1E6C 3E                  .BYTE   %00111110
+0419   1E6D 0A                  .BYTE   %00001010
+0420   1E6E 3E                  .BYTE   %00111110
+0421   1E6F 08                  .BYTE   %00001000
+0422   1E70             
+0423   1E70             ; $0B - Character: ':'          CHR$(14)
+0424   1E70             
+0425   1E70 00                  .BYTE   %00000000
+0426   1E71 00                  .BYTE   %00000000
+0427   1E72 00                  .BYTE   %00000000
+0428   1E73 10                  .BYTE   %00010000
+0429   1E74 00                  .BYTE   %00000000
+0430   1E75 00                  .BYTE   %00000000
+0431   1E76 10                  .BYTE   %00010000
+0432   1E77 00                  .BYTE   %00000000
+0433   1E78             
+0434   1E78             ; $0B - Character: '?'          CHR$(15)
+0435   1E78             
+0436   1E78 00                  .BYTE   %00000000
+0437   1E79 3C                  .BYTE   %00111100
+0438   1E7A 42                  .BYTE   %01000010
+0439   1E7B 04                  .BYTE   %00000100
+0440   1E7C 08                  .BYTE   %00001000
+0441   1E7D 00                  .BYTE   %00000000
+0442   1E7E 08                  .BYTE   %00001000
+0443   1E7F 00                  .BYTE   %00000000
+0444   1E80             
+0445   1E80             ; $10 - Character: '('          CHR$(16)
+0446   1E80             
+0447   1E80 00                  .BYTE   %00000000
+0448   1E81 04                  .BYTE   %00000100
+0449   1E82 08                  .BYTE   %00001000
+0450   1E83 08                  .BYTE   %00001000
+0451   1E84 08                  .BYTE   %00001000
+0452   1E85 08                  .BYTE   %00001000
+0453   1E86 04                  .BYTE   %00000100
+0454   1E87 00                  .BYTE   %00000000
+0455   1E88             
+0456   1E88             ; $11 - Character: ')'          CHR$(17)
+0457   1E88             
+0458   1E88 00                  .BYTE   %00000000
+0459   1E89 20                  .BYTE   %00100000
+0460   1E8A 10                  .BYTE   %00010000
+0461   1E8B 10                  .BYTE   %00010000
+0462   1E8C 10                  .BYTE   %00010000
+0463   1E8D 10                  .BYTE   %00010000
+0464   1E8E 20                  .BYTE   %00100000
+0465   1E8F 00                  .BYTE   %00000000
+0466   1E90             
+0467   1E90             ; $12 - Character: '>'          CHR$(18)
+0468   1E90             
+0469   1E90 00                  .BYTE   %00000000
+0470   1E91 00                  .BYTE   %00000000
+0471   1E92 10                  .BYTE   %00010000
+0472   1E93 08                  .BYTE   %00001000
+0473   1E94 04                  .BYTE   %00000100
+0474   1E95 08                  .BYTE   %00001000
+0475   1E96 10                  .BYTE   %00010000
+0476   1E97 00                  .BYTE   %00000000
+0477   1E98             
+0478   1E98             ; $13 - Character: '<'          CHR$(19)
+0479   1E98             
+0480   1E98 00                  .BYTE   %00000000
+0481   1E99 00                  .BYTE   %00000000
+0482   1E9A 04                  .BYTE   %00000100
+0483   1E9B 08                  .BYTE   %00001000
+0484   1E9C 10                  .BYTE   %00010000
+0485   1E9D 08                  .BYTE   %00001000
+0486   1E9E 04                  .BYTE   %00000100
+0487   1E9F 00                  .BYTE   %00000000
+0488   1EA0             
+0489   1EA0             ; $14 - Character: '='          CHR$(20)
+0490   1EA0             
+0491   1EA0 00                  .BYTE   %00000000
+0492   1EA1 00                  .BYTE   %00000000
+0493   1EA2 00                  .BYTE   %00000000
+0494   1EA3 3E                  .BYTE   %00111110
+0495   1EA4 00                  .BYTE   %00000000
+0496   1EA5 3E                  .BYTE   %00111110
+0497   1EA6 00                  .BYTE   %00000000
+0498   1EA7 00                  .BYTE   %00000000
+0499   1EA8             
+0500   1EA8             ; $15 - Character: '+'          CHR$(21)
+0501   1EA8             
+0502   1EA8 00                  .BYTE   %00000000
+0503   1EA9 00                  .BYTE   %00000000
+0504   1EAA 08                  .BYTE   %00001000
+0505   1EAB 08                  .BYTE   %00001000
+0506   1EAC 3E                  .BYTE   %00111110
+0507   1EAD 08                  .BYTE   %00001000
+0508   1EAE 08                  .BYTE   %00001000
+0509   1EAF 00                  .BYTE   %00000000
+0510   1EB0             
+0511   1EB0             ; $16 - Character: '-'          CHR$(22)
+0512   1EB0             
+0513   1EB0 00                  .BYTE   %00000000
+0514   1EB1 00                  .BYTE   %00000000
+0515   1EB2 00                  .BYTE   %00000000
+0516   1EB3 00                  .BYTE   %00000000
+0517   1EB4 3E                  .BYTE   %00111110
+0518   1EB5 00                  .BYTE   %00000000
+0519   1EB6 00                  .BYTE   %00000000
+0520   1EB7 00                  .BYTE   %00000000
+0521   1EB8             
+0522   1EB8             ; $17 - Character: '*'          CHR$(23)
+0523   1EB8             
+0524   1EB8 00                  .BYTE   %00000000
+0525   1EB9 00                  .BYTE   %00000000
+0526   1EBA 14                  .BYTE   %00010100
+0527   1EBB 08                  .BYTE   %00001000
+0528   1EBC 3E                  .BYTE   %00111110
+0529   1EBD 08                  .BYTE   %00001000
+0530   1EBE 14                  .BYTE   %00010100
+0531   1EBF 00                  .BYTE   %00000000
+0532   1EC0             
+0533   1EC0             ; $18 - Character: '/'          CHR$(24)
+0534   1EC0             
+0535   1EC0 00                  .BYTE   %00000000
+0536   1EC1 00                  .BYTE   %00000000
+0537   1EC2 02                  .BYTE   %00000010
+0538   1EC3 04                  .BYTE   %00000100
+0539   1EC4 08                  .BYTE   %00001000
+0540   1EC5 10                  .BYTE   %00010000
+0541   1EC6 20                  .BYTE   %00100000
+0542   1EC7 00                  .BYTE   %00000000
+0543   1EC8             
+0544   1EC8             ; $19 - Character: ';'          CHR$(25)
+0545   1EC8             
+0546   1EC8 00                  .BYTE   %00000000
+0547   1EC9 00                  .BYTE   %00000000
+0548   1ECA 10                  .BYTE   %00010000
+0549   1ECB 00                  .BYTE   %00000000
+0550   1ECC 00                  .BYTE   %00000000
+0551   1ECD 10                  .BYTE   %00010000
+0552   1ECE 10                  .BYTE   %00010000
+0553   1ECF 20                  .BYTE   %00100000
+0554   1ED0             
+0555   1ED0             ; $1A - Character: ','          CHR$(26)
+0556   1ED0             
+0557   1ED0 00                  .BYTE   %00000000
+0558   1ED1 00                  .BYTE   %00000000
+0559   1ED2 00                  .BYTE   %00000000
+0560   1ED3 00                  .BYTE   %00000000
+0561   1ED4 00                  .BYTE   %00000000
+0562   1ED5 08                  .BYTE   %00001000
+0563   1ED6 08                  .BYTE   %00001000
+0564   1ED7 10                  .BYTE   %00010000
+0565   1ED8             
+0566   1ED8             ; $1B - Character: '"'          CHR$(27)
+0567   1ED8             
+0568   1ED8 00                  .BYTE   %00000000
+0569   1ED9 00                  .BYTE   %00000000
+0570   1EDA 00                  .BYTE   %00000000
+0571   1EDB 00                  .BYTE   %00000000
+0572   1EDC 00                  .BYTE   %00000000
+0573   1EDD 18                  .BYTE   %00011000
+0574   1EDE 18                  .BYTE   %00011000
+0575   1EDF 00                  .BYTE   %00000000
+0576   1EE0             
+0577   1EE0             ; $1C - Character: '0'          CHR$(28)
+0578   1EE0             
+0579   1EE0 00                  .BYTE   %00000000
+0580   1EE1 3C                  .BYTE   %00111100
+0581   1EE2 46                  .BYTE   %01000110
+0582   1EE3 4A                  .BYTE   %01001010
+0583   1EE4 52                  .BYTE   %01010010
+0584   1EE5 62                  .BYTE   %01100010
+0585   1EE6 3C                  .BYTE   %00111100
+0586   1EE7 00                  .BYTE   %00000000
+0587   1EE8             
+0588   1EE8             ; $1D - Character: '1'          CHR$(29)
+0589   1EE8             
+0590   1EE8 00                  .BYTE   %00000000
+0591   1EE9 18                  .BYTE   %00011000
+0592   1EEA 28                  .BYTE   %00101000
+0593   1EEB 08                  .BYTE   %00001000
+0594   1EEC 08                  .BYTE   %00001000
+0595   1EED 08                  .BYTE   %00001000
+0596   1EEE 3E                  .BYTE   %00111110
+0597   1EEF 00                  .BYTE   %00000000
+0598   1EF0             
+0599   1EF0             ; $1E - Character: '2'          CHR$(30)
+0600   1EF0             
+0601   1EF0 00                  .BYTE   %00000000
+0602   1EF1 3C                  .BYTE   %00111100
+0603   1EF2 42                  .BYTE   %01000010
+0604   1EF3 02                  .BYTE   %00000010
+0605   1EF4 3C                  .BYTE   %00111100
+0606   1EF5 40                  .BYTE   %01000000
+0607   1EF6 7E                  .BYTE   %01111110
+0608   1EF7 00                  .BYTE   %00000000
+0609   1EF8             
+0610   1EF8             ; $1F - Character: '3'          CHR$(31)
+0611   1EF8             
+0612   1EF8 00                  .BYTE   %00000000
+0613   1EF9 3C                  .BYTE   %00111100
+0614   1EFA 42                  .BYTE   %01000010
+0615   1EFB 0C                  .BYTE   %00001100
+0616   1EFC 02                  .BYTE   %00000010
+0617   1EFD 42                  .BYTE   %01000010
+0618   1EFE 3C                  .BYTE   %00111100
+0619   1EFF 00                  .BYTE   %00000000
+0620   1F00             
+0621   1F00             ; $20 - Character: '4'          CHR$(32)
+0622   1F00             
+0623   1F00 00                  .BYTE   %00000000
+0624   1F01 08                  .BYTE   %00001000
+0625   1F02 18                  .BYTE   %00011000
+0626   1F03 28                  .BYTE   %00101000
+0627   1F04 48                  .BYTE   %01001000
+0628   1F05 7E                  .BYTE   %01111110
+0629   1F06 08                  .BYTE   %00001000
+0630   1F07 00                  .BYTE   %00000000
+0631   1F08             
+0632   1F08             ; $21 - Character: '5'          CHR$(33)
+0633   1F08             
+0634   1F08 00                  .BYTE   %00000000
+0635   1F09 7E                  .BYTE   %01111110
+0636   1F0A 40                  .BYTE   %01000000
+0637   1F0B 7C                  .BYTE   %01111100
+0638   1F0C 02                  .BYTE   %00000010
+0639   1F0D 42                  .BYTE   %01000010
+0640   1F0E 3C                  .BYTE   %00111100
+0641   1F0F 00                  .BYTE   %00000000
+0642   1F10             
+0643   1F10             ; $22 - Character: '6'          CHR$(34)
+0644   1F10             
+0645   1F10 00                  .BYTE   %00000000
+0646   1F11 3C                  .BYTE   %00111100
+0647   1F12 40                  .BYTE   %01000000
+0648   1F13 7C                  .BYTE   %01111100
+0649   1F14 42                  .BYTE   %01000010
+0650   1F15 42                  .BYTE   %01000010
+0651   1F16 3C                  .BYTE   %00111100
+0652   1F17 00                  .BYTE   %00000000
+0653   1F18             
+0654   1F18             ; $23 - Character: '7'          CHR$(35)
+0655   1F18             
+0656   1F18 00                  .BYTE   %00000000
+0657   1F19 7E                  .BYTE   %01111110
+0658   1F1A 02                  .BYTE   %00000010
+0659   1F1B 04                  .BYTE   %00000100
+0660   1F1C 08                  .BYTE   %00001000
+0661   1F1D 10                  .BYTE   %00010000
+0662   1F1E 10                  .BYTE   %00010000
+0663   1F1F 00                  .BYTE   %00000000
+0664   1F20             
+0665   1F20             ; $24 - Character: '8'          CHR$(36)
+0666   1F20             
+0667   1F20 00                  .BYTE   %00000000
+0668   1F21 3C                  .BYTE   %00111100
+0669   1F22 42                  .BYTE   %01000010
+0670   1F23 3C                  .BYTE   %00111100
+0671   1F24 42                  .BYTE   %01000010
+0672   1F25 42                  .BYTE   %01000010
+0673   1F26 3C                  .BYTE   %00111100
+0674   1F27 00                  .BYTE   %00000000
+0675   1F28             
+0676   1F28             ; $25 - Character: '9'          CHR$(37)
+0677   1F28             
+0678   1F28 00                  .BYTE   %00000000
+0679   1F29 3C                  .BYTE   %00111100
+0680   1F2A 42                  .BYTE   %01000010
+0681   1F2B 42                  .BYTE   %01000010
+0682   1F2C 3E                  .BYTE   %00111110
+0683   1F2D 02                  .BYTE   %00000010
+0684   1F2E 3C                  .BYTE   %00111100
+0685   1F2F 00                  .BYTE   %00000000
+0686   1F30             
+0687   1F30             ; $26 - Character: 'A'          CHR$(38)
+0688   1F30             
+0689   1F30 00                  .BYTE   %00000000
+0690   1F31 3C                  .BYTE   %00111100
+0691   1F32 42                  .BYTE   %01000010
+0692   1F33 42                  .BYTE   %01000010
+0693   1F34 7E                  .BYTE   %01111110
+0694   1F35 42                  .BYTE   %01000010
+0695   1F36 42                  .BYTE   %01000010
+0696   1F37 00                  .BYTE   %00000000
+0697   1F38             
+0698   1F38             ; $27 - Character: 'B'          CHR$(39)
+0699   1F38             
+0700   1F38 00                  .BYTE   %00000000
+0701   1F39 7C                  .BYTE   %01111100
+0702   1F3A 42                  .BYTE   %01000010
+0703   1F3B 7C                  .BYTE   %01111100
+0704   1F3C 42                  .BYTE   %01000010
+0705   1F3D 42                  .BYTE   %01000010
+0706   1F3E 7C                  .BYTE   %01111100
+0707   1F3F 00                  .BYTE   %00000000
+0708   1F40             
+0709   1F40             ; $28 - Character: 'C'          CHR$(40)
+0710   1F40             
+0711   1F40 00                  .BYTE   %00000000
+0712   1F41 3C                  .BYTE   %00111100
+0713   1F42 42                  .BYTE   %01000010
+0714   1F43 40                  .BYTE   %01000000
+0715   1F44 40                  .BYTE   %01000000
+0716   1F45 42                  .BYTE   %01000010
+0717   1F46 3C                  .BYTE   %00111100
+0718   1F47 00                  .BYTE   %00000000
+0719   1F48             
+0720   1F48             ; $29 - Character: 'D'          CHR$(41)
+0721   1F48             
+0722   1F48 00                  .BYTE   %00000000
+0723   1F49 78                  .BYTE   %01111000
+0724   1F4A 44                  .BYTE   %01000100
+0725   1F4B 42                  .BYTE   %01000010
+0726   1F4C 42                  .BYTE   %01000010
+0727   1F4D 44                  .BYTE   %01000100
+0728   1F4E 78                  .BYTE   %01111000
+0729   1F4F 00                  .BYTE   %00000000
+0730   1F50             
+0731   1F50             ; $2A - Character: 'E'          CHR$(42)
+0732   1F50             
+0733   1F50 00                  .BYTE   %00000000
+0734   1F51 7E                  .BYTE   %01111110
+0735   1F52 40                  .BYTE   %01000000
+0736   1F53 7C                  .BYTE   %01111100
+0737   1F54 40                  .BYTE   %01000000
+0738   1F55 40                  .BYTE   %01000000
+0739   1F56 7E                  .BYTE   %01111110
+0740   1F57 00                  .BYTE   %00000000
+0741   1F58             
+0742   1F58             ; $2B - Character: 'F'          CHR$(43)
+0743   1F58             
+0744   1F58 00                  .BYTE   %00000000
+0745   1F59 7E                  .BYTE   %01111110
+0746   1F5A 40                  .BYTE   %01000000
+0747   1F5B 7C                  .BYTE   %01111100
+0748   1F5C 40                  .BYTE   %01000000
+0749   1F5D 40                  .BYTE   %01000000
+0750   1F5E 40                  .BYTE   %01000000
+0751   1F5F 00                  .BYTE   %00000000
+0752   1F60             
+0753   1F60             ; $2C - Character: 'G'          CHR$(44)
+0754   1F60             
+0755   1F60 00                  .BYTE   %00000000
+0756   1F61 3C                  .BYTE   %00111100
+0757   1F62 42                  .BYTE   %01000010
+0758   1F63 40                  .BYTE   %01000000
+0759   1F64 4E                  .BYTE   %01001110
+0760   1F65 42                  .BYTE   %01000010
+0761   1F66 3C                  .BYTE   %00111100
+0762   1F67 00                  .BYTE   %00000000
+0763   1F68             
+0764   1F68             ; $2D - Character: 'H'          CHR$(45)
+0765   1F68             
+0766   1F68 00                  .BYTE   %00000000
+0767   1F69 42                  .BYTE   %01000010
+0768   1F6A 42                  .BYTE   %01000010
+0769   1F6B 7E                  .BYTE   %01111110
+0770   1F6C 42                  .BYTE   %01000010
+0771   1F6D 42                  .BYTE   %01000010
+0772   1F6E 42                  .BYTE   %01000010
+0773   1F6F 00                  .BYTE   %00000000
+0774   1F70             
+0775   1F70             ; $2E - Character: 'I'          CHR$(46)
+0776   1F70             
+0777   1F70 00                  .BYTE   %00000000
+0778   1F71 3E                  .BYTE   %00111110
+0779   1F72 08                  .BYTE   %00001000
+0780   1F73 08                  .BYTE   %00001000
+0781   1F74 08                  .BYTE   %00001000
+0782   1F75 08                  .BYTE   %00001000
+0783   1F76 3E                  .BYTE   %00111110
+0784   1F77 00                  .BYTE   %00000000
+0785   1F78             
+0786   1F78             ; $2F - Character: 'J'          CHR$(47)
+0787   1F78             
+0788   1F78 00                  .BYTE   %00000000
+0789   1F79 02                  .BYTE   %00000010
+0790   1F7A 02                  .BYTE   %00000010
+0791   1F7B 02                  .BYTE   %00000010
+0792   1F7C 42                  .BYTE   %01000010
+0793   1F7D 42                  .BYTE   %01000010
+0794   1F7E 3C                  .BYTE   %00111100
+0795   1F7F 00                  .BYTE   %00000000
+0796   1F80             
+0797   1F80             ; $30 - Character: 'K'          CHR$(48)
+0798   1F80             
+0799   1F80 00                  .BYTE   %00000000
+0800   1F81 44                  .BYTE   %01000100
+0801   1F82 48                  .BYTE   %01001000
+0802   1F83 70                  .BYTE   %01110000
+0803   1F84 48                  .BYTE   %01001000
+0804   1F85 44                  .BYTE   %01000100
+0805   1F86 42                  .BYTE   %01000010
+0806   1F87 00                  .BYTE   %00000000
+0807   1F88             
+0808   1F88             ; $31 - Character: 'L'          CHR$(49)
+0809   1F88             
+0810   1F88 00                  .BYTE   %00000000
+0811   1F89 40                  .BYTE   %01000000
+0812   1F8A 40                  .BYTE   %01000000
+0813   1F8B 40                  .BYTE   %01000000
+0814   1F8C 40                  .BYTE   %01000000
+0815   1F8D 40                  .BYTE   %01000000
+0816   1F8E 7E                  .BYTE   %01111110
+0817   1F8F 00                  .BYTE   %00000000
+0818   1F90             
+0819   1F90             ; $32 - Character: 'M'          CHR$(50)
+0820   1F90             
+0821   1F90 00                  .BYTE   %00000000
+0822   1F91 42                  .BYTE   %01000010
+0823   1F92 66                  .BYTE   %01100110
+0824   1F93 5A                  .BYTE   %01011010
+0825   1F94 42                  .BYTE   %01000010
+0826   1F95 42                  .BYTE   %01000010
+0827   1F96 42                  .BYTE   %01000010
+0828   1F97 00                  .BYTE   %00000000
+0829   1F98             
+0830   1F98             ; $33 - Character: 'N'          CHR$(51)
+0831   1F98             
+0832   1F98 00                  .BYTE   %00000000
+0833   1F99 42                  .BYTE   %01000010
+0834   1F9A 62                  .BYTE   %01100010
+0835   1F9B 52                  .BYTE   %01010010
+0836   1F9C 4A                  .BYTE   %01001010
+0837   1F9D 46                  .BYTE   %01000110
+0838   1F9E 42                  .BYTE   %01000010
+0839   1F9F 00                  .BYTE   %00000000
+0840   1FA0             
+0841   1FA0             ; $34 - Character: 'O'          CHR$(52)
+0842   1FA0             
+0843   1FA0 00                  .BYTE   %00000000
+0844   1FA1 3C                  .BYTE   %00111100
+0845   1FA2 42                  .BYTE   %01000010
+0846   1FA3 42                  .BYTE   %01000010
+0847   1FA4 42                  .BYTE   %01000010
+0848   1FA5 42                  .BYTE   %01000010
+0849   1FA6 3C                  .BYTE   %00111100
+0850   1FA7 00                  .BYTE   %00000000
+0851   1FA8             
+0852   1FA8             ; $35 - Character: 'P'          CHR$(53)
+0853   1FA8             
+0854   1FA8 00                  .BYTE   %00000000
+0855   1FA9 7C                  .BYTE   %01111100
+0856   1FAA 42                  .BYTE   %01000010
+0857   1FAB 42                  .BYTE   %01000010
+0858   1FAC 7C                  .BYTE   %01111100
+0859   1FAD 40                  .BYTE   %01000000
+0860   1FAE 40                  .BYTE   %01000000
+0861   1FAF 00                  .BYTE   %00000000
+0862   1FB0             
+0863   1FB0             ; $36 - Character: 'Q'          CHR$(54)
+0864   1FB0             
+0865   1FB0 00                  .BYTE   %00000000
+0866   1FB1 3C                  .BYTE   %00111100
+0867   1FB2 42                  .BYTE   %01000010
+0868   1FB3 42                  .BYTE   %01000010
+0869   1FB4 52                  .BYTE   %01010010
+0870   1FB5 4A                  .BYTE   %01001010
+0871   1FB6 3C                  .BYTE   %00111100
+0872   1FB7 00                  .BYTE   %00000000
+0873   1FB8             
+0874   1FB8             ; $37 - Character: 'R'          CHR$(55)
+0875   1FB8             
+0876   1FB8 00                  .BYTE   %00000000
+0877   1FB9 7C                  .BYTE   %01111100
+0878   1FBA 42                  .BYTE   %01000010
+0879   1FBB 42                  .BYTE   %01000010
+0880   1FBC 7C                  .BYTE   %01111100
+0881   1FBD 44                  .BYTE   %01000100
+0882   1FBE 42                  .BYTE   %01000010
+0883   1FBF 00                  .BYTE   %00000000
+0884   1FC0             
+0885   1FC0             ; $38 - Character: 'S'          CHR$(56)
+0886   1FC0             
+0887   1FC0 00                  .BYTE   %00000000
+0888   1FC1 3C                  .BYTE   %00111100
+0889   1FC2 40                  .BYTE   %01000000
+0890   1FC3 3C                  .BYTE   %00111100
+0891   1FC4 02                  .BYTE   %00000010
+0892   1FC5 42                  .BYTE   %01000010
+0893   1FC6 3C                  .BYTE   %00111100
+0894   1FC7 00                  .BYTE   %00000000
+0895   1FC8             
+0896   1FC8             ; $39 - Character: 'T'          CHR$(57)
+0897   1FC8             
+0898   1FC8 00                  .BYTE   %00000000
+0899   1FC9 FE                  .BYTE   %11111110
+0900   1FCA 10                  .BYTE   %00010000
+0901   1FCB 10                  .BYTE   %00010000
+0902   1FCC 10                  .BYTE   %00010000
+0903   1FCD 10                  .BYTE   %00010000
+0904   1FCE 10                  .BYTE   %00010000
+0905   1FCF 00                  .BYTE   %00000000
+0906   1FD0             
+0907   1FD0             ; $3A - Character: 'U'          CHR$(58)
+0908   1FD0             
+0909   1FD0 00                  .BYTE   %00000000
+0910   1FD1 42                  .BYTE   %01000010
+0911   1FD2 42                  .BYTE   %01000010
+0912   1FD3 42                  .BYTE   %01000010
+0913   1FD4 42                  .BYTE   %01000010
+0914   1FD5 42                  .BYTE   %01000010
+0915   1FD6 3C                  .BYTE   %00111100
+0916   1FD7 00                  .BYTE   %00000000
+0917   1FD8             
+0918   1FD8             ; $3B - Character: 'V'          CHR$(59)
+0919   1FD8             
+0920   1FD8 00                  .BYTE   %00000000
+0921   1FD9 42                  .BYTE   %01000010
+0922   1FDA 42                  .BYTE   %01000010
+0923   1FDB 42                  .BYTE   %01000010
+0924   1FDC 42                  .BYTE   %01000010
+0925   1FDD 24                  .BYTE   %00100100
+0926   1FDE 18                  .BYTE   %00011000
+0927   1FDF 00                  .BYTE   %00000000
+0928   1FE0             
+0929   1FE0             ; $3C - Character: 'W'          CHR$(60)
+0930   1FE0             
+0931   1FE0 00                  .BYTE   %00000000
+0932   1FE1 42                  .BYTE   %01000010
+0933   1FE2 42                  .BYTE   %01000010
+0934   1FE3 42                  .BYTE   %01000010
+0935   1FE4 42                  .BYTE   %01000010
+0936   1FE5 5A                  .BYTE   %01011010
+0937   1FE6 24                  .BYTE   %00100100
+0938   1FE7 00                  .BYTE   %00000000
+0939   1FE8             
+0940   1FE8             ; $3D - Character: 'X'          CHR$(61)
+0941   1FE8             
+0942   1FE8 00                  .BYTE   %00000000
+0943   1FE9 42                  .BYTE   %01000010
+0944   1FEA 24                  .BYTE   %00100100
+0945   1FEB 18                  .BYTE   %00011000
+0946   1FEC 18                  .BYTE   %00011000
+0947   1FED 24                  .BYTE   %00100100
+0948   1FEE 42                  .BYTE   %01000010
+0949   1FEF 00                  .BYTE   %00000000
+0950   1FF0             
+0951   1FF0             ; $3E - Character: 'Y'          CHR$(62)
+0952   1FF0             
+0953   1FF0 00                  .BYTE   %00000000
+0954   1FF1 82                  .BYTE   %10000010
+0955   1FF2 44                  .BYTE   %01000100
+0956   1FF3 28                  .BYTE   %00101000
+0957   1FF4 10                  .BYTE   %00010000
+0958   1FF5 10                  .BYTE   %00010000
+0959   1FF6 10                  .BYTE   %00010000
+0960   1FF7 00                  .BYTE   %00000000
+0961   1FF8             
+0962   1FF8             ; $3F - Character: 'Z'          CHR$(63)
+0963   1FF8             
+0964   1FF8 00                  .BYTE   %00000000
+0965   1FF9 7E                  .BYTE   %01111110
+0966   1FFA 04                  .BYTE   %00000100
+0967   1FFB 08                  .BYTE   %00001000
+0968   1FFC 10                  .BYTE   %00010000
+0969   1FFD 20                  .BYTE   %00100000
+0970   1FFE 7E                  .BYTE   %01111110
+0971   1FFF 00                  .BYTE   %00000000
+0972   2000             
+0973   2000             .END
+
+
+
+Label        Value      Label        Value      Label        Value
+------------------      ------------------      ------------------
+ASTERISK      0017      AFTER_TOP_BORDER 00A3      AFTER_DISPLAY 00AD      
+AFTER_BOTTOM_BORDER 00B1      CHAR_SPACE    0000      CHAR_0        001C      
+CHAR_Z        003F      CHECK_EOL     0115      DFILE_PTR     400C      
+DFILE         4100      DRAW_BORDER   00B4      DRAW_DISPLAY  00C4      
+DFILE_ROW     00D4      DFILE_CHAR    00D9      END_OF_BORDER 006F      
+INTERRUPT     0038      INIT_DISPLAY  007E      INIT          00CA      
+MARGIN        4028      NEW_LINE      0076      NEW_ROW       003C      
+NMI           0066      NMI_RET       006D      NEXT_ROW      00F2      
+NEXT_CHAR     00F7      NEXT_C        0108      PRE_VSYNC_LOOP 0084      
+START         0000      SCAN_LINE     0045      START_FRAME   0082      
+USER_INIT     00EB      USER_LOOP     0103      VSYNC_LOOP    0097      
+WAIT_INT      0041      
+
+tasm: Number of errors = 0
